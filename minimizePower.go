@@ -13,6 +13,7 @@ import (
 	"math"
 	"github.com/k-sone/ipmigo"
 	"os"
+	"sync"
 	"encoding/csv"
 
 	"k8s.io/api/core/v1"
@@ -36,10 +37,11 @@ type Model_list struct{
 	Ambient_timestamp map[string]time.Time
 	Ambient_buf float32
 	Power_cache map[key]float32
+	sync.Mutex
 }
 
 type key struct{
-	cpu, ambient string
+	server, cpu, ambient string
 }
 
 type Model struct{
@@ -254,16 +256,32 @@ func GetNodeTemperature(node_address string) (float32, error){
 	//fmt.Printf(format, sname, stype, reading, units, status)
 }
 
+func(m *Model_list) SetCache(k key, value float32) {
+	m.Lock()
+	m.Power_cache[k] = value
+	m.Unlock()
+}
+
+func(m *Model_list) GetCache(k key) (float32, bool){
+	m.Lock()
+	value, ok:= m.Power_cache[k]
+	m.Unlock()
+	return value, ok
+}
+
 func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status){
 //	if value, exist := pod.Labels["prediction"]; exist && value == "true"{
 		nodeInfo, err := m.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
+		if klog.V(2){
+			klog.Infof("OwnerReferences: %v", pod.OwnerReferences)
+		}
 		if err != nil {
 			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("getting node %q from Snapshot: %v", nodeName, err))
 		}
 
 		node := nodeInfo.Node()
 		if node	== nil {
-			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Node cannot be nil"))
+			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Node is nil"))
 		}
 
 		NodeMetrics, Metrics_err := GetNodeMetrics(node.Name)
@@ -272,26 +290,20 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 		}
 		NodeMetrics_CPU := NodeMetrics.Usage["cpu"]
 		buf_dec := NodeMetrics_CPU.AsDec()
-		NodeCPU_usage, err := strconv.ParseFloat(buf_dec.String(), 32)
-		if err != nil{
-			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Metrics of node %s cannot be got", nodeName))
-		}
+		NodeCPU_usage, _ := strconv.ParseFloat(buf_dec.String(), 32)
 		Node_resource := node.Status.Capacity["cpu"]
 		buf_dec = Node_resource.AsDec()
-		NodeCPU_capacity, err := strconv.ParseFloat(buf_dec.String(), 32)
-		if err != nil{
-			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Cannot get node %s resource info", nodeName))
-		}
+		NodeCPU_capacity, _ := strconv.ParseFloat(buf_dec.String(), 32)
 		model_name := node.Labels["predict_service"]
 
 		pod_resource_limits := pod.Spec.Containers[0].Resources.Limits["cpu"]
 		buf_dec = pod_resource_limits.AsDec()
 		Limits_core, err_limit := strconv.ParseFloat(buf_dec.String(), 32)
-		klog.Infof("Pod %s limit: AsDec -> %v, AsDec.String() -> %v, strconv -> %v", pod.Name, buf_dec, buf_dec.String(), Limits_core)
+		//klog.Infof("Pod %s limit: AsDec -> %v, AsDec.String() -> %v, strconv -> %v", pod.Name, buf_dec, buf_dec.String(), Limits_core)
 		pod_resource_requests := pod.Spec.Containers[0].Resources.Requests["cpu"]
 		buf_dec = pod_resource_requests.AsDec()
 		Requests_core, err_request := strconv.ParseFloat(buf_dec.String(), 32)
-		klog.Infof("Pod %s request: AsDec -> %v, AsDec.String() -> %v, strconv -> %v", pod.Name, buf_dec, buf_dec.String(), Requests_core)
+		//klog.Infof("Pod %s request: AsDec -> %v, AsDec.String() -> %v, strconv -> %v", pod.Name, buf_dec, buf_dec.String(), Requests_core)
 		now_usage := float32(NodeCPU_usage/NodeCPU_capacity)*float32(100)
 		//klog.Infof("Node %s usage: %v", nodeName, now_usage)
 		var next_usage float32
@@ -328,23 +340,44 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 			Input_now[0], Input_next[0] = (m.Ambient[nodeName] - model.Average[0])/model.Deviation[0], (m.Ambient[nodeName] - model.Average[0])/model.Deviation[0]
 		}
 
-		if v, ok := m.Wind[node.Name]; ok{
-			Input_now[2], err = model.BackPlaneWind(now_usage, temp)
-			Input_next[2], err = model.BackPlaneWind(next_usage, temp)
-			Input_now[2] += v
-			Input_next[2] += v
-			Input_now[2] = (Input_now[2] - model.Average[2])/model.Deviation[2]
-			Input_next[2] = (Input_next[2] - model.Average[2])/model.Deviation[2]
+		var result_now, result_next float32
+		if v, ok := m.GetCache(key{nodeName, fmt.Sprintf("%.1f", now_usage), fmt.Sprintf("%.1f", temp)}); ok{
+			result_now = v
 		}else{
-			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Wind of node %s cannot be got", nodeName))
+			if v, ok := m.Wind[node.Name]; ok{
+				Input_now[2], err = model.BackPlaneWind(now_usage, temp)
+				Input_now[2] += v
+				Input_now[2] = (Input_now[2] - model.Average[2])/model.Deviation[2]
+			}else{
+				return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Wind of node %s cannot be got", nodeName))
+			}
+			result_buf, err := model.PowerPredict(Input_now, "prediction-service.default.svc.cluster.local:8500")
+			if err != nil{
+				return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Power of node %s cannot be got", nodeName))
+			}
+			result_now = result_buf[0]
+			m.SetCache(key{nodeName, fmt.Sprintf("%.1f", now_usage), fmt.Sprintf("%.1f", temp)}, result_now)
 		}
-		result_now, err := model.PowerPredict(Input_now, "prediction-service.default.svc.cluster.local:8500")
-		result_next, err := model.PowerPredict(Input_next, "prediction-service.default.svc.cluster.local:8500")
-		if err != nil{
-			return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Power of node %s cannot be got", nodeName))
+
+		if v, ok := m.GetCache(key{nodeName, fmt.Sprintf("%.1f", next_usage), fmt.Sprintf("%.1f", temp)}); ok{
+			result_next = v
+		}else{
+			if v, ok := m.Wind[node.Name]; ok{
+				Input_next[2], err = model.BackPlaneWind(next_usage, temp)
+				Input_next[2] += v
+				Input_next[2] = (Input_next[2] - model.Average[2])/model.Deviation[2]
+			}else{
+				return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Wind of node %s cannot be got", nodeName))
+			}
+			result_buf, err := model.PowerPredict(Input_next, "prediction-service.default.svc.cluster.local:8500")
+			if err != nil{
+				return 0, framework.NewStatus(framework.Error, fmt.Sprintf("Power of node %s cannot be got", nodeName))
+			}
+			result_next = result_buf[0]
+			m.SetCache(key{nodeName, fmt.Sprintf("%.1f", next_usage), fmt.Sprintf("%.1f", temp)}, result_next)
 		}
-		klog.Infof("Node %s power: now -> %v, next -> %v", nodeName, result_now[0], result_next[0])
-		score := result_next[0] - result_now[0]
+		//klog.Infof("Node %s power: now -> %v, next -> %v", nodeName, result_now, result_next)
+		score := result_next - result_now
 		klog.Infof("Node %s -> score: %f", nodeName, score)
 
 		return int64(score), nil
@@ -399,6 +432,7 @@ func New(_ *runtime.Unknown, h framework.FrameworkHandle) (framework.Plugin, err
 
 	reader := csv.NewReader(file)
 	m.Wind = make(map[string]float32)
+	m.Power_cache = make(map[key]float32)
 	m.Ambient = make(map[string]float32)
 	m.Ambient_timestamp = make(map[string]time.Time)
 	_, _ = reader.Read()
