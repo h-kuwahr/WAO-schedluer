@@ -1,0 +1,157 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wao-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wao-scheduler-as-kube-scheduler
+subjects:
+- kind: ServiceAccount
+  name: wao-scheduler
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: system:kube-scheduler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wao-scheduler-volume-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+- kind: ServiceAccount
+  name: wao-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wao-scheduler-config-role-binding
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+- kind: ServiceAccount
+  name: wao-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-reader-role
+rules:
+- apiGroups: ["metrics.k8s.io"]
+  resources: [pods, nodes]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wao-scheduler-metrics-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io 
+  kind: ClusterRole
+  name: metrics-reader-role
+subjects:
+- kind: ServiceAccount
+  name: wao-scheduler
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: csinode-role
+rules:
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csinodes"]
+  verbs: ["watch", "list", "get"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["watch", "list", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wao-scheduler-csinode-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: csinode-role
+subjects:
+- kind: ServiceAccount
+  name: wao-scheduler
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    component: scheduler
+    tier: control-plane
+  name: wao-scheduler
+  namespace: kube-system
+spec:
+ selector:
+   matchLabels:
+     component: scheduler
+     tier: control-plane
+ replicas: 1
+ template:
+   metadata:
+     labels:
+       component: scheduler
+       tier: control-plane
+       version: second
+   spec:
+     serviceAccountName: wao-scheduler
+     containers:
+     - command:
+       - /usr/local/bin/kube-scheduler
+       - --address=0.0.0.0
+       - --leader-elect=false
+       - --scheduler-name=wao-scheduler
+       - --policy-config-file=/etc/config/policy.cfg
+       - --config=/etc/config/plugin.yaml
+       - -v=2
+       image: kuwa8810/wao-scheduler:1.2
+       livenessProbe:
+         httpGet:
+           path: /healthz
+           port: 10251
+         initialDelaySeconds: 15
+       name: kube-second-scheduler
+       readinessProbe:
+         httpGet:
+           path: /healthz
+           port: 10251
+       resources:
+         requests:
+           cpu: '2'
+       securityContext:
+         privileged: false
+       volumeMounts:
+       - name: wao-scheduler-config
+         mountPath: /etc/config
+     tolerations:
+     - key: node-role.kubernetes.io/master
+       effect: NoSchedule
+     - key: app
+       value: batch
+       effect: NoSchedule
+     nodeSelector:
+       node-role.kubernetes.io/master: ""
+     hostNetwork: false
+     hostPID: false
+     volumes: 
+     - name: wao-scheduler-config
+       configMap:
+         name: wao-scheduler-config

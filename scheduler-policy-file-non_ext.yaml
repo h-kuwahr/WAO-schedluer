@@ -1,0 +1,51 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: wao-scheduler-config
+  namespace: kube-system
+data:
+  policy.cfg: |
+    {
+        "kind" : "Policy",
+        "apiVersion" : "v1",
+        "metadata" : {
+            "name": "wao-scheduler-config",
+            "namespace": "kube-system"
+        },
+        "predicates" : [
+            {"name" : "PodFitsResources"},
+            {"name" : "PodToleratesNodeTaints"},
+            {"name" : "MatchInterPodAffinity"}
+        ],
+        "priorities":[
+            {"name" : "LeastRequestedPriority", "weight" : 1}
+        ]
+     }
+  policy-wao.cfg: |
+     {
+        "kind" : "Policy",
+        "apiVersion" : "v1",
+        "metadata" : {
+            "name": "wao-scheduler-config",
+            "namespace": "kube-system"
+        },
+        "predicates" : [
+            {"name" : "PodFitsResources"}
+        ]
+     }
+  plugin.yaml: |
+     kind: KubeSchedulerConfiguration
+     apiVersion: kubescheduler.config.k8s.io/v1alpha1
+     schedulerName: wao-scheduler
+     leaderElection:
+       leaderElect: false
+     algorithmSource:
+       policy:
+         file:
+          path: /etc/config/policy-wao.cfg 
+     plugins: 
+       score:
+        enabled:
+        - name: wao-score-plugin
+          weight: 50
+     percentageOfNodesToScore: 100

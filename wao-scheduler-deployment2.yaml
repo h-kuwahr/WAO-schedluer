@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    component: scheduler
+    tier: control-plane
+  name: wao-scheduler2
+  namespace: kube-system
+spec:
+ selector:
+   matchLabels:
+     component: scheduler
+     tier: control-plane
+ replicas: 1
+ template:
+   metadata:
+     labels:
+       component: scheduler
+       tier: control-plane
+       version: second
+   spec:
+     serviceAccountName: wao-scheduler
+     containers:
+     - command:
+       - /usr/local/bin/kube-scheduler
+       - --address=0.0.0.0
+       - --leader-elect=false
+       - --scheduler-name=wao-scheduler2
+       - --policy-config-file=/etc/config/policy.cfg
+       image: kuwa8810/wao-scheduler:1.0
+       livenessProbe:
+         httpGet:
+           path: /healthz
+           port: 10251
+         initialDelaySeconds: 15
+       name: kube-second-scheduler
+       readinessProbe:
+         httpGet:
+           path: /healthz
+           port: 10251
+       resources:
+         requests:
+           cpu: '2'
+       securityContext:
+         privileged: false
+       volumeMounts: 
+         - name: wao-scheduler-config
+           mountPath: /etc/config
+     tolerations:
+     - key: node-role.kubernetes.io/master
+       effect: NoSchedule
+     nodeSelector:
+       node-role.kubernetes.io/master: ""
+     hostNetwork: false
+     hostPID: false
+     volumes: 
+     - name: wao-scheduler-config
+       configMap:
+         name: wao-scheduler-config

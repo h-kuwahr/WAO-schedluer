@@ -1,0 +1,29 @@
+models:
+  m4-prediction:
+    model_name: "m4-prediction"
+    inputs_name: "dense_3_input"
+    outputs_name: "dense_4"
+    num_inputs: 3
+    num_outputs: 1
+    average:
+      - 21.22066835
+      - 30.80672564
+      - 1.36074754
+    deviation:
+      - 3.87597217
+      - 32.89087585
+      - 0.31000659
+  m2-prediction:
+    model_name: "m2-prediction"
+    inputs_name: "dense_11_input"
+    outputs_name: "dense_12"
+    num_inputs: 3
+    num_outputs: 1
+    average:
+      - 21.67768249
+      - 43.3120022
+      - 1.89775664
+    deviation:
+      - 3.88498587
+      - 30.83407824
+      - 0.15576092
