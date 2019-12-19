@@ -30,7 +30,9 @@ data:
             "namespace": "kube-system"
         },
         "predicates" : [
-            {"name" : "PodFitsResources"}
+            {"name" : "PodFitsResources"},
+            {"name" : "PodToleratesNodeTaints"},
+            {"name" : "MatchInterPodAffinity"}
         ]
      }
   plugin.yaml: |

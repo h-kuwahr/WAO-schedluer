@@ -19,6 +19,7 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/klog"
 	"k8s.io/apimachinery/pkg/runtime"
+	//"k8s.io/apimachinery/pkg/labels"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	"k8s.io/client-go/tools/clientcmd"
 	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
@@ -37,6 +38,7 @@ type Model_list struct{
 	Ambient_timestamp map[string]time.Time
 	Ambient_buf float32
 	Power_cache map[key]float32
+	Starting_pod_list map[string]float64
 	sync.Mutex
 }
 
@@ -172,7 +174,7 @@ func GetNodeMetrics(node string)(*v1beta1.NodeMetrics, error){
                 return nil, err
         }
         mc, err := metrics.NewForConfig(config)
-				if err != nil {
+	if err != nil {
                 return nil, err
         }
         nm := mc.MetricsV1beta1().NodeMetricses()
@@ -185,6 +187,25 @@ func GetNodeMetrics(node string)(*v1beta1.NodeMetrics, error){
 	}
 	return nodemetrics, err1
         //klog.Infof("List -> %v, err -> %v", convertedList, err2)
+}
+
+func GetPodMetrics(pod string, namespace string)(*v1beta1.PodMetrics, error){
+	 var kubeconfig, master string //empty, assuming inClusterConfig
+	 var podmetrics *v1beta1.PodMetrics
+	 config, err := clientcmd.BuildConfigFromFlags(master, kubeconfig)
+	 if err != nil{
+		 return nil, err
+	 }
+	 mc, err := metrics.NewForConfig(config)
+	 if err != nil {
+		 return nil, err
+	 }
+	 pm := mc.MetricsV1beta1().PodMetricses(namespace)
+	 podmetrics, err = pm.Get(pod, metav1.GetOptions{})
+	 if klog.V(2){
+		 klog.Infof("Get -> %v, err -> %v", podmetrics, err)
+	 }
+	 return podmetrics, err
 }
 
 func GetNodeTemperature(node_address string) (float32, error){
@@ -269,6 +290,19 @@ func(m *Model_list) GetCache(k key) (float32, bool){
 	return value, ok
 }
 
+func(m *Model_list) DeleteKey(k string){
+	m.Lock()
+	defer m.Unlock()
+	delete(m.Starting_pod_list, k)
+}
+
+func(m *Model_list) ReadMap(k string) (v float64, ok bool){
+	m.Lock()
+	defer m.Unlock()
+	v, ok = m.Starting_pod_list[k]
+	return
+}
+
 func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) (int64, *framework.Status){
 //	if value, exist := pod.Labels["prediction"]; exist && value == "true"{
 		nodeInfo, err := m.handle.SnapshotSharedLister().NodeInfos().Get(nodeName)
@@ -295,6 +329,26 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 		buf_dec = Node_resource.AsDec()
 		NodeCPU_capacity, _ := strconv.ParseFloat(buf_dec.String(), 32)
 		model_name := node.Labels["predict_service"]
+		pods := nodeInfo.Pods()
+		for _, pod := range pods{
+			if v, ok := m.ReadMap(pod.Name); ok{
+				var pod_usage float64
+				pod_metrics, err := GetPodMetrics(pod.Name, pod.Namespace)
+				if err == nil {
+					for _, container := range pod_metrics.Containers{
+						container_CPU := container.Usage["cpu"]
+						buf_dec = container_CPU.AsDec()
+						container_usage, _ := strconv.ParseFloat(buf_dec.String(), 32)
+						pod_usage += container_usage
+					}
+				}
+				if pod_usage < v * 0.03 {
+					NodeCPU_usage += pod_usage
+				} else {
+					m.DeleteKey(pod.Name)
+				}
+			}
+		}
 
 		pod_resource_limits := pod.Spec.Containers[0].Resources.Limits["cpu"]
 		buf_dec = pod_resource_limits.AsDec()
@@ -314,15 +368,18 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 		}else{
 			//When non request and limit, the pod is not scored
 			klog.Infof("Pod %s deos not define requested and limited resources", pod.Name)
-			return int64(0), nil
+			return int64(-1), nil
 		}
 		model, ok := m.Models[model_name]
 		if !ok {
 			klog.Infof("Model %s is not registerd", model_name)
-			return int64(0),nil
+			return int64(-1), nil
 		}
 		Input_now, Input_next := make([]float32, model.Num_inputs), make([]float32, model.Num_inputs)
 		Input_now[1], Input_next[1] = (now_usage - model.Average[1])/model.Deviation[1], (next_usage - model.Average[1])/model.Deviation[1]
+		if next_usage > float32((NodeCPU_capacity - 1.0)/NodeCPU_capacity)*float32(100){
+			return int64(-1), nil
+		}
 
 		var temp float32
 		if m.Ambient_timestamp[nodeName].IsZero() || int(time.Since(m.Ambient_timestamp[nodeName]).Minutes()) >= 120 {
@@ -395,20 +452,33 @@ func (m *Model_list) NormalizeScore(ctx context.Context, state *framework.CycleS
 	highest := int64(0)
 	lowest := int64(math.MaxInt64)
 	for _, score := range scores {
-		if score.Score > highest{
+		if score.Score > highest && score.Score >= 0{
 			highest = score.Score
 		}
-		if score.Score < lowest{
+		if score.Score < lowest && score.Score >= 0{
 			lowest = score.Score
 		}
 	}
 	NodeScoreMax := framework.MaxNodeScore
 	for node, score := range scores {
-		if highest != lowest {
+		if score.Score < 0{
+			scores[node].Score = 0
+		}else if highest != lowest {
 			scores[node].Score = int64(NodeScoreMax - (NodeScoreMax*(score.Score - lowest)/(highest - lowest)))
 		}else{
-			scores[node].Score = 0
+			scores[node].Score = 10
 		}
+	}
+	pod_resource_limits := p.Spec.Containers[0].Resources.Limits["cpu"]
+	buf_dec := pod_resource_limits.AsDec()
+	Limits_core, err_limit := strconv.ParseFloat(buf_dec.String(), 32)
+	pod_resource_requests := p.Spec.Containers[0].Resources.Requests["cpu"]
+	buf_dec = pod_resource_requests.AsDec()
+	Requests_core, err_request := strconv.ParseFloat(buf_dec.String(), 32)
+	if Requests_core != 0 && err_request == nil{
+		m.Starting_pod_list[p.Name] = Requests_core
+	}else if Limits_core != 0 && err_limit == nil{
+		m.Starting_pod_list[p.Name] = Limits_core
 	}
 	return nil
 }
@@ -435,6 +505,7 @@ func New(_ *runtime.Unknown, h framework.FrameworkHandle) (framework.Plugin, err
 	m.Power_cache = make(map[key]float32)
 	m.Ambient = make(map[string]float32)
 	m.Ambient_timestamp = make(map[string]time.Time)
+	m.Starting_pod_list = make(map[string]float64)
 	_, _ = reader.Read()
 	nodeInfos := m.handle.SnapshotSharedLister().NodeInfos()
 	for {

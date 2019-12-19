@@ -120,7 +120,7 @@ spec:
        - --leader-elect=false
        - --scheduler-name=wao-scheduler
        - --policy-config-file=/etc/config/policy.cfg
-       - --config=/etc/config/plugin.yaml
+         #- --config=/etc/config/plugin.yaml
        - -v=2
        image: kuwa8810/wao-scheduler:1.2
        livenessProbe:
