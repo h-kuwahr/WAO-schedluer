@@ -329,11 +329,11 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 		buf_dec = Node_resource.AsDec()
 		NodeCPU_capacity, _ := strconv.ParseFloat(buf_dec.String(), 32)
 		model_name := node.Labels["predict_service"]
-		pods := nodeInfo.Pods()
-		for _, pod := range pods{
-			if v, ok := m.ReadMap(pod.Name); ok{
+		d_pods := nodeInfo.Pods()
+		for _, p := range d_pods{
+			if v, ok := m.ReadMap(p.Name); ok{
 				var pod_usage float64
-				pod_metrics, err := GetPodMetrics(pod.Name, pod.Namespace)
+				pod_metrics, err := GetPodMetrics(p.Name, p.Namespace)
 				if err == nil {
 					for _, container := range pod_metrics.Containers{
 						container_CPU := container.Usage["cpu"]
@@ -343,9 +343,12 @@ func(m *Model_list) Score(ctx context.Context, state *framework.CycleState, pod 
 					}
 				}
 				if pod_usage < v * 0.03 {
-					NodeCPU_usage += pod_usage
+					if klog.V(2) {
+						klog.Infof("Pod %v is starting with %v requested CPU. (Now usage: %v)", p.Name, v, pod_usage)
+					}
+					NodeCPU_usage += v - pod_usage
 				} else {
-					m.DeleteKey(pod.Name)
+					m.DeleteKey(p.Name)
 				}
 			}
 		}
